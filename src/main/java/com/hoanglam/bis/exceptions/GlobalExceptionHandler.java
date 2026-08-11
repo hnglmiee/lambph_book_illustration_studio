@@ -1,7 +1,7 @@
-package exceptions;
+package com.hoanglam.bis.exceptions;
 
-import com.hoanglam.bis.dto.response.ApiResponse;
-import enums.ErrorCode;
+import com.hoanglam.bis.response.ApiResponse;
+import com.hoanglam.bis.enums.ErrorCode;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.MethodArgumentNotValidException;

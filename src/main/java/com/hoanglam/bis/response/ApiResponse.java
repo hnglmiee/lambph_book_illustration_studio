@@ -1,4 +1,4 @@
-package com.hoanglam.bis.dto.response;
+package com.hoanglam.bis.response;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
 import lombok.Getter;

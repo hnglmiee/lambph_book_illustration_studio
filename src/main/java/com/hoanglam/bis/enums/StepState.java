@@ -1,4 +1,4 @@
-package enums;
+package com.hoanglam.bis.enums;
 
 public enum StepState {
     IDLE,
