@@ -1,6 +1,6 @@
-package exceptions;
+package com.hoanglam.bis.exceptions;
 
-import enums.ErrorCode;
+import com.hoanglam.bis.enums.ErrorCode;
 import lombok.Getter;
 
 @Getter
