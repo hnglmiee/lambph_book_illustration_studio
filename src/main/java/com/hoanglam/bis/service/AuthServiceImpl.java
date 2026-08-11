@@ -83,4 +83,16 @@ public class AuthServiceImpl implements AuthService {
 
         return UserResponse.fromEntity(user, token);
     }
+
+    @Override
+    @Transactional(readOnly = true)
+    public UserResponse getCurrentUser(UUID userId) {
+
+        User user = userRepository.findById(userId)
+                .orElseThrow(() ->
+                        new BadRequestException("User not found")
+                );
+
+        return UserResponse.fromEntity(user, null);
+    }
 }

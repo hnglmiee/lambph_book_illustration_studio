@@ -8,8 +8,11 @@ import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 import com.hoanglam.bis.response.ApiResponse;
+
+import java.util.UUID;
 
 @RestController
 @RequestMapping("/api/auth")
@@ -28,5 +31,13 @@ public class AuthController {
     public ResponseEntity<ApiResponse<UserResponse>> register(@Valid @RequestBody RegisterRequest request) {
         UserResponse result = authService.register(request);
         return ResponseEntity.ok(ApiResponse.success("Đăng ký thành công", result));
+    }
+    @GetMapping("/me")
+    public ResponseEntity<UserResponse> getCurrentUser(
+            Authentication authentication
+    ) {
+        UUID userId = (UUID) authentication.getPrincipal();
+
+        return ResponseEntity.ok(authService.getCurrentUser(userId));
     }
 }
