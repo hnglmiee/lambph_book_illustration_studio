@@ -46,6 +46,16 @@ public class JwtUtil {
         }
     }
 
+    public UUID getUserId(String token) {
+        return UUID.fromString(
+                parseClaims(token).get("userId", String.class)
+        );
+    }
+
+    public String getName(String token) {
+        return parseClaims(token).getSubject();
+    }
+
     private Claims parseClaims(String token) {
         return Jwts.parser()
                 .verifyWith(key)
