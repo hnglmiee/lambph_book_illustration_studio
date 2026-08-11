@@ -1,5 +1,7 @@
 package com.hoanglam.bis.model;
 
+import enums.ProjectStatus;
+import enums.StepState;
 import jakarta.persistence.*;
 import lombok.Getter;
 import lombok.Setter;
