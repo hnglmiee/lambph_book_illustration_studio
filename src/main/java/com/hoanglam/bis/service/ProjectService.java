@@ -1,5 +1,6 @@
 package com.hoanglam.bis.service;
 
+import com.hoanglam.bis.config.StepStaleChecker;
 import com.hoanglam.bis.dto.ChapterResponse;
 import com.hoanglam.bis.dto.CharacterResponse;
 import com.hoanglam.bis.dto.CreateProjectRequest;
@@ -158,6 +159,7 @@ public class ProjectService {
                 .chapters(chapters)
                 .createdAt(p.getCreatedAt())
                 .updatedAt(p.getUpdatedAt())
+                .stale(StepStaleChecker.isStale(p))
                 .build();
     }
 

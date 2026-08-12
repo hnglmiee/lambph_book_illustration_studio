@@ -25,4 +25,5 @@ public class ProjectDetailResponse {
     private List<ChapterResponse> chapters;
     private OffsetDateTime createdAt;
     private OffsetDateTime updatedAt;
+    private Boolean stale;
 }

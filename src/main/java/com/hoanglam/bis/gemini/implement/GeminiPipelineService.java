@@ -2,9 +2,9 @@ package com.hoanglam.bis.gemini.implement;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.hoanglam.bis.config.StepStaleChecker;
 import com.hoanglam.bis.dto.*;
 import com.hoanglam.bis.enums.ErrorCode;
-import com.hoanglam.bis.enums.PipelineStep;
 import com.hoanglam.bis.enums.ProjectStatus;
 import com.hoanglam.bis.enums.StepState;
 import com.hoanglam.bis.exceptions.ApiException;
@@ -23,15 +23,14 @@ import org.springframework.transaction.annotation.Transactional;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
-import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.Base64;
 
 @Slf4j
@@ -49,10 +48,8 @@ public class GeminiPipelineService {
     private static final String TEXT_MODEL = "gemini-3.6-flash";
     private static final String IMAGE_MODEL = "gemini-2.5-flash-image";
 
-    /**
-     * Entry point gọi từ Controller — validate + lock + trả về ngay,
-     * việc gọi Gemini thật chạy nền qua @Async.
-     */
+    private static final long STALE_THRESHOLD_SECONDS = 120;
+
     @Transactional
     public void startStyleStep(UUID projectId, String userStyle) {
         Project project = loadForUpdate(projectId);
@@ -540,6 +537,124 @@ public class GeminiPipelineService {
 
         } catch (Exception e) {
             log.error("Chapters step failed for project {}", projectId, e);
+            markStepFailed(projectId, e.getMessage());
+        }
+    }
+
+//    public boolean isStale(Project project) {
+//        return project.getStepState() == StepState.RUNNING
+//                && project.getStepStartedAt() != null
+//                && Duration.between(project.getStepStartedAt(), OffsetDateTime.now()).getSeconds() > STALE_THRESHOLD_SECONDS;
+//    }
+
+    @Transactional
+    public void retryCurrentStep(UUID projectId, String userStyleIfStyleStep) {
+        Project project = loadForUpdate(projectId);
+
+        if (project.getStepState() == StepState.RUNNING) {
+            if (!StepStaleChecker.isStale(project)) {
+                throw new ApiException(ErrorCode.STEP_ALREADY_RUNNING,
+                        "Step is still running, please wait", 409);
+            }
+            // Stranded (server chết giữa chừng) -> tự phục hồi, cho phép retry
+            log.warn("Detected stale RUNNING step for project {}, auto-recovering to allow retry", projectId);
+            project.setStepState(StepState.FAILED);
+            project.setStepFailureReason("Step was interrupted (stranded in progress) and has been reset for retry");
+            project.setStepStartedAt(null);
+            projectRepository.saveAndFlush(project);
+        } else if (project.getStepState() != StepState.FAILED) {
+            throw new ApiException(ErrorCode.STEP_NOT_FAILED,
+                    "Nothing to retry — current step is not in a failed state", 400);
+        }
+
+        // Dựa theo status hiện tại, biết chính xác bước nào cần chạy lại
+        switch (project.getStatus()) {
+            case CREATED -> startStyleStep(projectId, userStyleIfStyleStep);
+            case STYLE_SET -> startCharactersStep(projectId);
+            case CHARACTERS_GENERATED -> startPortraitsStep(projectId);
+            case PORTRAITS_GENERATED -> startChaptersStep(projectId);
+            case CHAPTERS_GENERATED -> startIllustrationsStep(projectId);
+            case DONE -> throw new ApiException(ErrorCode.INVALID_STEP_ORDER,
+                    "Project is already complete, nothing to retry", 400);
+        }
+    }
+
+    @Transactional
+    public void startIllustrationsStep(UUID projectId) {
+        Project project = loadForUpdate(projectId);
+
+        if (project.getStatus() != ProjectStatus.CHAPTERS_GENERATED) {
+            throw new ApiException(ErrorCode.INVALID_STEP_ORDER,
+                    "Illustrations step requires Chapters to be completed first", 400);
+        }
+        if (project.getStepState() == StepState.RUNNING) {
+            throw new ApiException(ErrorCode.STEP_ALREADY_RUNNING,
+                    "Illustrations step is already running", 409);
+        }
+
+        project.setStepState(StepState.RUNNING);
+        project.setStepStartedAt(OffsetDateTime.now());
+        project.setStepFailureReason(null);
+
+        try {
+            projectRepository.saveAndFlush(project);
+        } catch (ObjectOptimisticLockingFailureException e) {
+            throw new ApiException(ErrorCode.STEP_ALREADY_RUNNING,
+                    "Illustrations step is already running (concurrent request detected)", 409);
+        }
+
+        runIllustrationsStepAsync(projectId);
+    }
+
+    @Async("geminiTaskExecutor")
+    protected void runIllustrationsStepAsync(UUID projectId) {
+        try {
+            Project project = projectRepository.findById(projectId)
+                    .orElseThrow(() -> new IllegalStateException("Project vanished mid-run: " + projectId));
+
+            // Setup context — báo cho model biết sắp minh họa chương, nhắc nhớ lại các portrait đã tạo
+            CreateInteractionRequest setupRequest = CreateInteractionRequest.builder()
+                    .model(IMAGE_MODEL)
+                    .input("Starting from now, we're going to illustrate the book's chapters. " +
+                            "Don't forget to refer to your previous illustrations of the characters " +
+                            "to keep the characters consistent, but feel free to change their position.")
+                    .previousInteractionId(project.getLastImageInteractionId())
+                    .build();
+
+            GeminiInteraction setupInteraction = geminiInteractionClient.createInteraction(setupRequest);
+            String lastImageInteractionId = setupInteraction.getId();
+
+            for (Chapter chapter : project.getChapters()) {
+                CreateInteractionRequest illustrationRequest = CreateInteractionRequest.builder()
+                        .model(IMAGE_MODEL)
+                        .input("Create an illustration for " + chapter.getName() +
+                                " using the previously generated characters, following this description: " +
+                                chapter.getPrompt())
+                        .previousInteractionId(lastImageInteractionId)
+                        .build();
+
+                GeminiInteraction illustrationInteraction = geminiInteractionClient.createInteraction(illustrationRequest);
+
+                GeminiContent image = extractImageOutput(illustrationInteraction);
+                String path = saveImageToDisk(image.getData(), image.getMimeType(), chapter.getId());
+
+                chapter.setIllustrationPath(path);
+                chapter.setIllustrationReady(true);
+                projectRepository.save(project); // lưu ngay sau mỗi ảnh -> reveal tuần tự khi FE polling
+
+                lastImageInteractionId = illustrationInteraction.getId();
+            }
+
+            project.setLastImageInteractionId(lastImageInteractionId);
+            project.setStatus(ProjectStatus.DONE);
+            project.setStepState(StepState.IDLE);
+            project.setStepStartedAt(null);
+            projectRepository.save(project);
+
+            log.info("Illustrations step completed for project {} — pipeline DONE", projectId);
+
+        } catch (Exception e) {
+            log.error("Illustrations step failed for project {}", projectId, e);
             markStepFailed(projectId, e.getMessage());
         }
     }
