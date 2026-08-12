@@ -1,15 +1,15 @@
 package com.hoanglam.bis.gemini.implement;
 
-import com.hoanglam.bis.dto.CreateInteractionRequest;
-import com.hoanglam.bis.dto.GeminiContent;
-import com.hoanglam.bis.dto.GeminiInteraction;
-import com.hoanglam.bis.dto.InputContentPart;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.hoanglam.bis.dto.*;
 import com.hoanglam.bis.enums.ErrorCode;
 import com.hoanglam.bis.enums.PipelineStep;
 import com.hoanglam.bis.enums.ProjectStatus;
 import com.hoanglam.bis.enums.StepState;
 import com.hoanglam.bis.exceptions.ApiException;
 import com.hoanglam.bis.gemini.dto.*;
+import com.hoanglam.bis.gemini.dto.GeminiFile;
 import com.hoanglam.bis.model.Project;
 import com.hoanglam.bis.repository.ProjectRepository;
 import lombok.RequiredArgsConstructor;
@@ -23,7 +23,9 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.time.OffsetDateTime;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 @Slf4j
@@ -34,6 +36,8 @@ public class GeminiPipelineService {
     private final ProjectRepository projectRepository;
     private final GeminiFileClient geminiFileClient;
     private final GeminiInteractionClient geminiInteractionClient;
+    private static final ObjectMapper JSON_MAPPER = new ObjectMapper();
+    private static final int MAX_CHARACTERS = 2;
 
     private static final String TEXT_MODEL = "gemini-3.6-flash";
 
@@ -180,5 +184,113 @@ public class GeminiPipelineService {
     private Project loadForUpdate(UUID projectId) {
         return projectRepository.findById(projectId)
                 .orElseThrow(() -> new ApiException(ErrorCode.PROJECT_NOT_FOUND, "Project not found", 404));
+    }
+
+
+
+    @Transactional
+    public void startCharactersStep(UUID projectId) {
+        Project project = loadForUpdate(projectId);
+
+        if (project.getStatus() != ProjectStatus.STYLE_SET) {
+            throw new ApiException(ErrorCode.INVALID_STEP_ORDER,
+                    "Characters step requires Style to be completed first", 400);
+        }
+        if (project.getStepState() == StepState.RUNNING) {
+            throw new ApiException(ErrorCode.STEP_ALREADY_RUNNING,
+                    "Characters step is already running", 409);
+        }
+
+        project.setStepState(StepState.RUNNING);
+        project.setStepStartedAt(OffsetDateTime.now());
+        project.setStepFailureReason(null);
+
+        try {
+            projectRepository.saveAndFlush(project);
+        } catch (ObjectOptimisticLockingFailureException e) {
+            throw new ApiException(ErrorCode.STEP_ALREADY_RUNNING,
+                    "Characters step is already running (concurrent request detected)", 409);
+        }
+
+        runCharactersStepAsync(projectId);
+    }
+
+    @Async("geminiTaskExecutor")
+    protected void runCharactersStepAsync(UUID projectId) {
+        try {
+            Project project = projectRepository.findById(projectId)
+                    .orElseThrow(() -> new IllegalStateException("Project vanished mid-run: " + projectId));
+
+            Map<String, Object> schema = Map.of(
+                    "type", "array",
+                    "items", Map.of(
+                            "type", "object",
+                            "properties", Map.of(
+                                    "name", Map.of("type", "string"),
+                                    "prompt", Map.of("type", "string")
+                            ),
+                            "required", List.of("name", "prompt")
+                    )
+            );
+
+            ResponseFormat responseFormat = ResponseFormat.builder()
+                    .type("text")
+                    .mimeType("application/json")
+                    .schema(schema)
+                    .build();
+
+            String prompt = "Can you describe the main characters (only the adults) and prepare a prompt " +
+                    "describing them with as much detail as possible (use descriptions from the book) so " +
+                    "Nano Banana can generate images of them? List at most " + MAX_CHARACTERS +
+                    " main characters. Each prompt should be at least 50 words.";
+
+            CreateInteractionRequest request = CreateInteractionRequest.builder()
+                    .model(TEXT_MODEL)
+                    .input(prompt)
+                    .previousInteractionId(project.getLastTextInteractionId())
+                    .responseFormat(responseFormat)
+                    .build();
+
+            GeminiInteraction interaction = geminiInteractionClient.createInteraction(request);
+            String jsonText = extractTextOutput(interaction);
+
+            List<CharacterPromptDto> parsed = JSON_MAPPER.readValue(
+                    jsonText, new TypeReference<List<CharacterPromptDto>>() {});
+
+            // Enforce cap SERVER-SIDE — dù Gemini trả nhiều hơn, chỉ lấy đúng MAX_CHARACTERS đầu tiên
+            List<CharacterPromptDto> capped = parsed.stream()
+                    .limit(MAX_CHARACTERS)
+                    .toList();
+
+            if (capped.isEmpty()) {
+                throw new IllegalStateException("Gemini returned no characters");
+            }
+
+            List<com.hoanglam.bis.model.Character> entities = new ArrayList<>();
+            for (int i = 0; i < capped.size(); i++) {
+                CharacterPromptDto dto = capped.get(i);
+                com.hoanglam.bis.model.Character character = new com.hoanglam.bis.model.Character();
+                character.setProject(project);
+                character.setPosition(i);
+                character.setName(dto.getName());
+                character.setPrompt(dto.getPrompt());
+                character.setPortraitReady(false);
+                entities.add(character);
+            }
+
+            project.getCharacters().clear();
+            project.getCharacters().addAll(entities);
+            project.setLastTextInteractionId(interaction.getId());
+            project.setStatus(ProjectStatus.CHARACTERS_GENERATED);
+            project.setStepState(StepState.IDLE);
+            project.setStepStartedAt(null);
+            projectRepository.save(project);
+
+            log.info("Characters step completed for project {} with {} characters", projectId, entities.size());
+
+        } catch (Exception e) {
+            log.error("Characters step failed for project {}", projectId, e);
+            markStepFailed(projectId, e.getMessage());
+        }
     }
 }
