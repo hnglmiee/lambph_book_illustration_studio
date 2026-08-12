@@ -573,9 +573,89 @@ public class GeminiPipelineService {
             case STYLE_SET -> startCharactersStep(projectId);
             case CHARACTERS_GENERATED -> startPortraitsStep(projectId);
             case PORTRAITS_GENERATED -> startChaptersStep(projectId);
-//            case CHAPTERS_GENERATED -> startIllustrationsStep(projectId);
+            case CHAPTERS_GENERATED -> startIllustrationsStep(projectId);
             case DONE -> throw new ApiException(ErrorCode.INVALID_STEP_ORDER,
                     "Project is already complete, nothing to retry", 400);
+        }
+    }
+
+    @Transactional
+    public void startIllustrationsStep(UUID projectId) {
+        Project project = loadForUpdate(projectId);
+
+        if (project.getStatus() != ProjectStatus.CHAPTERS_GENERATED) {
+            throw new ApiException(ErrorCode.INVALID_STEP_ORDER,
+                    "Illustrations step requires Chapters to be completed first", 400);
+        }
+        if (project.getStepState() == StepState.RUNNING) {
+            throw new ApiException(ErrorCode.STEP_ALREADY_RUNNING,
+                    "Illustrations step is already running", 409);
+        }
+
+        project.setStepState(StepState.RUNNING);
+        project.setStepStartedAt(OffsetDateTime.now());
+        project.setStepFailureReason(null);
+
+        try {
+            projectRepository.saveAndFlush(project);
+        } catch (ObjectOptimisticLockingFailureException e) {
+            throw new ApiException(ErrorCode.STEP_ALREADY_RUNNING,
+                    "Illustrations step is already running (concurrent request detected)", 409);
+        }
+
+        runIllustrationsStepAsync(projectId);
+    }
+
+    @Async("geminiTaskExecutor")
+    protected void runIllustrationsStepAsync(UUID projectId) {
+        try {
+            Project project = projectRepository.findById(projectId)
+                    .orElseThrow(() -> new IllegalStateException("Project vanished mid-run: " + projectId));
+
+            // Setup context — báo cho model biết sắp minh họa chương, nhắc nhớ lại các portrait đã tạo
+            CreateInteractionRequest setupRequest = CreateInteractionRequest.builder()
+                    .model(IMAGE_MODEL)
+                    .input("Starting from now, we're going to illustrate the book's chapters. " +
+                            "Don't forget to refer to your previous illustrations of the characters " +
+                            "to keep the characters consistent, but feel free to change their position.")
+                    .previousInteractionId(project.getLastImageInteractionId())
+                    .build();
+
+            GeminiInteraction setupInteraction = geminiInteractionClient.createInteraction(setupRequest);
+            String lastImageInteractionId = setupInteraction.getId();
+
+            for (Chapter chapter : project.getChapters()) {
+                CreateInteractionRequest illustrationRequest = CreateInteractionRequest.builder()
+                        .model(IMAGE_MODEL)
+                        .input("Create an illustration for " + chapter.getName() +
+                                " using the previously generated characters, following this description: " +
+                                chapter.getPrompt())
+                        .previousInteractionId(lastImageInteractionId)
+                        .build();
+
+                GeminiInteraction illustrationInteraction = geminiInteractionClient.createInteraction(illustrationRequest);
+
+                GeminiContent image = extractImageOutput(illustrationInteraction);
+                String path = saveImageToDisk(image.getData(), image.getMimeType(), chapter.getId());
+
+                chapter.setIllustrationPath(path);
+                chapter.setIllustrationReady(true);
+                projectRepository.save(project); // lưu ngay sau mỗi ảnh -> reveal tuần tự khi FE polling
+
+                lastImageInteractionId = illustrationInteraction.getId();
+            }
+
+            project.setLastImageInteractionId(lastImageInteractionId);
+            project.setStatus(ProjectStatus.DONE);
+            project.setStepState(StepState.IDLE);
+            project.setStepStartedAt(null);
+            projectRepository.save(project);
+
+            log.info("Illustrations step completed for project {} — pipeline DONE", projectId);
+
+        } catch (Exception e) {
+            log.error("Illustrations step failed for project {}", projectId, e);
+            markStepFailed(projectId, e.getMessage());
         }
     }
 }
