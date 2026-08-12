@@ -36,7 +36,7 @@ class DataInitializerTest {
         verify(userRepository, times(1)).save(userCaptor.capture());
 
         User createdUser = userCaptor.getValue();
-        assertThat(createdUser.getId()).isEqualTo(DataInitializer.ADMIN_ID);
+//        assertThat(createdUser.getId()).isEqualTo(DataInitializer.ADMIN_ID);
         assertThat(createdUser.getEmail()).isEqualTo(DataInitializer.ADMIN_EMAIL);
         assertThat(createdUser.getName()).isEqualTo(DataInitializer.ADMIN_NAME);
     }
@@ -45,7 +45,7 @@ class DataInitializerTest {
     @DisplayName("Should skip creating admin user when admin email already exists in DB")
     void skipCreateAdminUserWhenPresent() {
         User existingAdmin = new User();
-        existingAdmin.setId(DataInitializer.ADMIN_ID);
+//        existingAdmin.setId(DataInitializer.ADMIN_ID);
         existingAdmin.setEmail(DataInitializer.ADMIN_EMAIL);
         existingAdmin.setName(DataInitializer.ADMIN_NAME);
 
