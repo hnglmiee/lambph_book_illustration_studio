@@ -10,6 +10,7 @@ import com.hoanglam.bis.enums.StepState;
 import com.hoanglam.bis.exceptions.ApiException;
 import com.hoanglam.bis.gemini.dto.*;
 import com.hoanglam.bis.gemini.dto.GeminiFile;
+import com.hoanglam.bis.model.Chapter;
 import com.hoanglam.bis.model.Project;
 import com.hoanglam.bis.repository.ProjectRepository;
 import lombok.RequiredArgsConstructor;
@@ -28,6 +29,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.Base64;
+
 @Slf4j
 @Service
 @RequiredArgsConstructor
@@ -38,8 +44,10 @@ public class GeminiPipelineService {
     private final GeminiInteractionClient geminiInteractionClient;
     private static final ObjectMapper JSON_MAPPER = new ObjectMapper();
     private static final int MAX_CHARACTERS = 2;
+    private static final int MAX_CHAPTERS = 1;
 
     private static final String TEXT_MODEL = "gemini-3.6-flash";
+    private static final String IMAGE_MODEL = "gemini-2.5-flash-image";
 
     /**
      * Entry point gọi từ Controller — validate + lock + trả về ngay,
@@ -290,6 +298,248 @@ public class GeminiPipelineService {
 
         } catch (Exception e) {
             log.error("Characters step failed for project {}", projectId, e);
+            markStepFailed(projectId, e.getMessage());
+        }
+    }
+
+    private static final int MAX_POLL_ATTEMPTS = 30;
+    private static final long POLL_INTERVAL_MS = 3000;
+
+    private GeminiInteraction pollUntilDone(String interactionId) {
+        GeminiInteraction interaction = geminiInteractionClient.getInteraction(interactionId);
+        int attempts = 0;
+        while (isPending(interaction.getStatus()) && attempts < MAX_POLL_ATTEMPTS) {
+            try {
+                Thread.sleep(POLL_INTERVAL_MS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("Polling interrupted", e);
+            }
+            interaction = geminiInteractionClient.getInteraction(interactionId);
+            attempts++;
+        }
+        if (isPending(interaction.getStatus())) {
+            throw new IllegalStateException("Gemini interaction timed out after " + MAX_POLL_ATTEMPTS + " polls");
+        }
+        if (!"completed".equals(interaction.getStatus())) {
+            throw new IllegalStateException("Gemini interaction ended with status: " + interaction.getStatus());
+        }
+        return interaction;
+    }
+
+    private boolean isPending(String status) {
+        return "queued".equals(status) || "in_progress".equals(status);
+    }
+
+    private static final String IMAGES_DIR = "./data/images";
+
+    private String saveImageToDisk(String base64Data, String mimeType, UUID entityId) {
+        try {
+            byte[] bytes = Base64.getDecoder().decode(base64Data);
+            String extension = mimeType != null && mimeType.contains("png") ? "png" : "jpg";
+            Path dir = Paths.get(IMAGES_DIR);
+            Files.createDirectories(dir);
+            Path filePath = dir.resolve(entityId + "." + extension);
+            Files.write(filePath, bytes);
+            return filePath.toString();
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to save image to disk", e);
+        }
+    }
+
+    private GeminiContent extractImageOutput(GeminiInteraction interaction) {
+        if (interaction.getSteps() == null) {
+            throw new IllegalStateException("No steps in interaction response");
+        }
+        return interaction.getSteps().stream()
+                .filter(step -> "model_output".equals(step.getType()))
+                .filter(step -> step.getContent() != null)
+                .flatMap(step -> step.getContent().stream())
+                .filter(content -> "image".equals(content.getType()))
+                .findFirst()
+                .orElseThrow(() -> new IllegalStateException("No image found in Gemini response"));
+    }
+
+
+    @Transactional
+    public void startPortraitsStep(UUID projectId) {
+        Project project = loadForUpdate(projectId);
+
+        if (project.getStatus() != ProjectStatus.CHARACTERS_GENERATED) {
+            throw new ApiException(ErrorCode.INVALID_STEP_ORDER,
+                    "Portraits step requires Characters to be completed first", 400);
+        }
+        if (project.getStepState() == StepState.RUNNING) {
+            throw new ApiException(ErrorCode.STEP_ALREADY_RUNNING,
+                    "Portraits step is already running", 409);
+        }
+
+        project.setStepState(StepState.RUNNING);
+        project.setStepStartedAt(OffsetDateTime.now());
+        project.setStepFailureReason(null);
+
+        try {
+            projectRepository.saveAndFlush(project);
+        } catch (ObjectOptimisticLockingFailureException e) {
+            throw new ApiException(ErrorCode.STEP_ALREADY_RUNNING,
+                    "Portraits step is already running (concurrent request detected)", 409);
+        }
+
+        runPortraitsStepAsync(projectId);
+    }
+
+    @Async("geminiTaskExecutor")
+    protected void runPortraitsStepAsync(UUID projectId) {
+        try {
+            Project project = projectRepository.findById(projectId)
+                    .orElseThrow(() -> new IllegalStateException("Project vanished mid-run: " + projectId));
+
+            // Setup context ảnh — KHÔNG dùng background, gọi đồng bộ
+            CreateInteractionRequest setupRequest = CreateInteractionRequest.builder()
+                    .model(IMAGE_MODEL)
+                    .input("You are going to generate portrait images to illustrate this book. " +
+                            "The style we want you to follow is: " + project.getStyle())
+                    .build();
+
+            GeminiInteraction setupInteraction = geminiInteractionClient.createInteraction(setupRequest);
+            String lastImageInteractionId = setupInteraction.getId();
+
+            for (com.hoanglam.bis.model.Character character : project.getCharacters()) {
+                CreateInteractionRequest portraitRequest = CreateInteractionRequest.builder()
+                        .model(IMAGE_MODEL)
+                        .input("Create an illustration for " + character.getName() +
+                                " following this description: " + character.getPrompt())
+                        .previousInteractionId(lastImageInteractionId)
+                        .build();
+
+                GeminiInteraction portraitInteraction = geminiInteractionClient.createInteraction(portraitRequest);
+
+                GeminiContent image = extractImageOutput(portraitInteraction);
+                String path = saveImageToDisk(image.getData(), image.getMimeType(), character.getId());
+
+                character.setPortraitPath(path);
+                character.setPortraitReady(true);
+                projectRepository.save(project);
+
+                lastImageInteractionId = portraitInteraction.getId();
+            }
+
+            project.setLastImageInteractionId(lastImageInteractionId);
+            project.setStatus(ProjectStatus.PORTRAITS_GENERATED);
+            project.setStepState(StepState.IDLE);
+            project.setStepStartedAt(null);
+            projectRepository.save(project);
+
+            log.info("Portraits step completed for project {}", projectId);
+
+        } catch (Exception e) {
+            log.error("Portraits step failed for project {}", projectId, e);
+            markStepFailed(projectId, e.getMessage());
+        }
+    }
+
+    @Transactional
+    public void startChaptersStep(UUID projectId) {
+        Project project = loadForUpdate(projectId);
+
+        if (project.getStatus() != ProjectStatus.PORTRAITS_GENERATED) {
+            throw new ApiException(ErrorCode.INVALID_STEP_ORDER,
+                    "Chapters step requires Portraits to be completed first", 400);
+        }
+        if (project.getStepState() == StepState.RUNNING) {
+            throw new ApiException(ErrorCode.STEP_ALREADY_RUNNING,
+                    "Chapters step is already running", 409);
+        }
+
+        project.setStepState(StepState.RUNNING);
+        project.setStepStartedAt(OffsetDateTime.now());
+        project.setStepFailureReason(null);
+
+        try {
+            projectRepository.saveAndFlush(project);
+        } catch (ObjectOptimisticLockingFailureException e) {
+            throw new ApiException(ErrorCode.STEP_ALREADY_RUNNING,
+                    "Chapters step is already running (concurrent request detected)", 409);
+        }
+
+        runChaptersStepAsync(projectId);
+    }
+
+    @Async("geminiTaskExecutor")
+    protected void runChaptersStepAsync(UUID projectId) {
+        try {
+            Project project = projectRepository.findById(projectId)
+                    .orElseThrow(() -> new IllegalStateException("Project vanished mid-run: " + projectId));
+
+            Map<String, Object> schema = Map.of(
+                    "type", "array",
+                    "items", Map.of(
+                            "type", "object",
+                            "properties", Map.of(
+                                    "name", Map.of("type", "string"),
+                                    "prompt", Map.of("type", "string")
+                            ),
+                            "required", List.of("name", "prompt")
+                    )
+            );
+
+            ResponseFormat responseFormat = ResponseFormat.builder()
+                    .type("text")
+                    .mimeType("application/json")
+                    .schema(schema)
+                    .build();
+
+            String prompt = "Now, for the chapters of the book, give me a prompt to illustrate what happens. " +
+                    "It should be a single image, not a multi-tiled page. Be very descriptive, especially of " +
+                    "the characters — remember to mention their names and reuse the character prompts if they " +
+                    "appear in the image. List at most " + MAX_CHAPTERS + " chapter(s).";
+
+            CreateInteractionRequest request = CreateInteractionRequest.builder()
+                    .model(TEXT_MODEL)
+                    .input(prompt)
+                    .previousInteractionId(project.getLastTextInteractionId())
+                    .responseFormat(responseFormat)
+                    .build();
+
+            GeminiInteraction interaction = geminiInteractionClient.createInteraction(request);
+            String jsonText = extractTextOutput(interaction);
+
+            List<CharacterPromptDto> parsed = JSON_MAPPER.readValue(
+                    jsonText, new TypeReference<List<CharacterPromptDto>>() {});
+
+            // Enforce cap SERVER-SIDE — chỉ lấy đúng MAX_CHAPTERS đầu tiên dù Gemini trả nhiều hơn
+            List<CharacterPromptDto> capped = parsed.stream()
+                    .limit(MAX_CHAPTERS)
+                    .toList();
+
+            if (capped.isEmpty()) {
+                throw new IllegalStateException("Gemini returned no chapters");
+            }
+
+            List<Chapter> entities = new ArrayList<>();
+            for (int i = 0; i < capped.size(); i++) {
+                CharacterPromptDto dto = capped.get(i);
+                Chapter chapter = new Chapter();
+                chapter.setProject(project);
+                chapter.setPosition(i);
+                chapter.setName(dto.getName());
+                chapter.setPrompt(dto.getPrompt());
+                chapter.setIllustrationReady(false);
+                entities.add(chapter);
+            }
+
+            project.getChapters().clear();
+            project.getChapters().addAll(entities);
+            project.setLastTextInteractionId(interaction.getId());
+            project.setStatus(ProjectStatus.CHAPTERS_GENERATED);
+            project.setStepState(StepState.IDLE);
+            project.setStepStartedAt(null);
+            projectRepository.save(project);
+
+            log.info("Chapters step completed for project {} with {} chapters", projectId, entities.size());
+
+        } catch (Exception e) {
+            log.error("Chapters step failed for project {}", projectId, e);
             markStepFailed(projectId, e.getMessage());
         }
     }

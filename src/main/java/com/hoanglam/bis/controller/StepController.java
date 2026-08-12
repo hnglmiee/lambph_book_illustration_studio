@@ -28,11 +28,4 @@ public class StepController {
                 .status(HttpStatus.ACCEPTED) // 202 — đã nhận, đang xử lý nền
                 .body(ApiResponse.success("Style generation started", null));
     }
-    @PostMapping("/characters/run")
-    public ResponseEntity<ApiResponse<Void>> runCharactersStep(@PathVariable UUID projectId) {
-        pipelineService.startCharactersStep(projectId);
-        return ResponseEntity
-                .status(HttpStatus.ACCEPTED)
-                .body(ApiResponse.success("Characters generation started", null));
-    }
 }
