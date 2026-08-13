@@ -1,17 +1,27 @@
 # Book Illustration Studio
 
-Turns a book's text into character portraits and a chapter illustration, using the Gemini API. Five steps, run one at a time by the user: **Style → Characters → Portraits → Chapters → Illustrations**.
+Turns a book's text into character portraits and chapter illustrations using the Gemini API.
 
-## Quick start
+The application is organized into five sequential steps, each run manually by the user:
+
+**Style → Characters → Portraits → Chapters → Illustrations**
+
+## Quick Start
 
 ```bash
 cp .env.example .env
-# edit .env, set GEMINI_API_KEY
+# Edit .env and set GEMINI_API_KEY
 
 ./start.sh
 ```
 
-Backend: `http://localhost:8080` · Frontend: `http://localhost:5173` · Swagger: `http://localhost:8080/swagger-ui/index.html`
+### Services
+
+| Service    | URL                                         |
+| ---------- | ------------------------------------------- |
+| Backend    | http://localhost:8080                       |
+| Frontend   | http://localhost:5173                       |
+| Swagger UI | http://localhost:8080/swagger-ui/index.html |
 
 ## Tests
 
@@ -19,33 +29,140 @@ Backend: `http://localhost:8080` · Frontend: `http://localhost:5173` · Swagger
 ./test.sh
 ```
 
-Runs backend unit tests (JUnit + Mockito, no real Gemini calls, no quota cost). See `TESTING.md` for strategy and the latest report.
+Runs the backend unit tests using **JUnit + Mockito**.
+
+Tests do not make real Gemini API calls, so they do not consume API quota.
+
+See [`TESTING.md`](TESTING.md) for the testing strategy and latest test report.
 
 ## Prerequisites
 
-- Java 21
-- Maven (or use the bundled `./mvnw`)
-- Node.js 20+ / npm
-- Docker + Docker Compose (for Postgres)
-- A Gemini API key: https://aistudio.google.com/app/apikey
+* Java 21
+* Maven, or the bundled `./mvnw`
+* Node.js 20+
+* npm
+* Docker + Docker Compose
+* A Gemini API key
 
-## Environment variables
+Get a Gemini API key from [Google AI Studio](https://aistudio.google.com/app/apikey).
 
-See `.env.example`. The only required variable is `GEMINI_API_KEY`. Postgres credentials are pre-set for local dev in `docker-compose.yml` (not secrets — this is a throwaway local container).
+## Environment Variables
 
-## Architecture overview
+See `.env.example` for the complete configuration.
 
-- **Backend**: Spring Boot (Java 21), Postgres via Docker, Flyway-managed schema (`src/main/resources/db/migration`), JPA/Hibernate with `ddl-auto=validate` (migrations are the source of truth, not Hibernate auto-DDL).
-- **Frontend**: React + Vite + TypeScript.
-- **Storage**: book text and generated images live on the local filesystem (`./data/books`, `./data/images`), served through dedicated API endpoints — no S3/CDN, per the assignment's scope constraint.
-- **Gemini integration**: REST calls to the `interactions` API (not the SDK — see `DECISIONS.md` for why), with two independent conversation chains per project: one for text steps (book upload → style → characters → chapters) and one for image steps (portrait setup → portraits → illustration setup → illustrations), so the book's content is sent to Gemini exactly once and reused via `previous_interaction_id` for every subsequent call.
-- **Pipeline state**: each project tracks `status` (last completed step) and `step_state` (`IDLE`/`RUNNING`/`FAILED`) as two separate fields, plus a timestamp used to detect and recover a step stranded mid-call (e.g. a server restart) without manual DB intervention. See `DECISIONS.md` for the full reasoning.
-- **Concurrency**: JPA optimistic locking (`@Version`) plus an explicit `RUNNING` check inside the same transaction prevents a refresh, a second tab, or a double-click from firing the same Gemini call twice.
+The only required environment variable is:
 
-## AI artifacts
+```env
+GEMINI_API_KEY=your_api_key_here
+```
 
-This project was built with AI coding assistance (Claude, via chat-driven iterative development). See `AGENTS.md` for the project context file used to keep the assistant aligned with the spec, and `DECISIONS.md` for the record of where AI-generated output was wrong and had to be corrected.
+Postgres credentials are pre-configured for local development in `docker-compose.yml`. These are not production secrets; the database is intended for a throwaway local container.
 
-## Known limitations
+## Architecture
 
-See "If we had one more day" in `DECISIONS.md`.
+### Backend
+
+* **Spring Boot**
+* **Java 21**
+* **PostgreSQL**
+* **Flyway** for database migrations
+* **JPA / Hibernate**
+* `ddl-auto=validate`
+
+Database migrations are the source of truth. Hibernate does **not** automatically create or modify the database schema.
+
+### Frontend
+
+* **React**
+* **Vite**
+* **TypeScript**
+
+### Storage
+
+Book text and generated images are stored on the local filesystem:
+
+```text
+./data/books
+./data/images
+```
+
+They are served through dedicated backend API endpoints.
+
+No S3 or CDN is used, in accordance with the assignment's scope constraints.
+
+### Gemini Integration
+
+The application communicates with Gemini through the **REST Interactions API**, rather than the Gemini SDK.
+
+There are two independent conversation chains per project:
+
+```text
+Text Chain
+Book Upload
+    ↓
+Style
+    ↓
+Characters
+    ↓
+Chapters
+
+Image Chain
+Portrait Setup
+    ↓
+Portraits
+    ↓
+Illustration Setup
+    ↓
+Illustrations
+```
+
+The book's content is sent to Gemini only once. Subsequent requests reuse the conversation through `previous_interaction_id`.
+
+This avoids repeatedly sending the same book content for every step.
+
+### Pipeline State
+
+Each project tracks two independent pieces of state:
+
+* `status` — the last successfully completed step
+* `step_state` — the current execution state:
+
+  * `IDLE`
+  * `RUNNING`
+  * `FAILED`
+
+A timestamp is also stored to detect a step that became stranded while a Gemini request was in progress, for example after a server restart.
+
+This allows the application to recover without requiring manual database intervention.
+
+See [`DECISIONS.md`](DECISIONS.md) for the detailed reasoning behind this design.
+
+### Concurrency
+
+The application uses **JPA optimistic locking** with `@Version`.
+
+An explicit `RUNNING` check is also performed inside the same transaction before starting a Gemini call.
+
+This prevents duplicate execution caused by:
+
+* Refreshing the page
+* Opening the project in multiple tabs
+* Double-clicking a step
+* Multiple requests being submitted concurrently
+
+As a result, the same Gemini step cannot be accidentally triggered multiple times.
+
+## AI-Assisted Development
+
+This project was built with AI coding assistance using **Claude** through chat-driven iterative development.
+
+The project includes:
+
+* [`AGENTS.md`](AGENTS.md) — project context and instructions provided to the AI assistant
+* [`DECISIONS.md`](DECISIONS.md) — record of important implementation decisions, including cases where AI-generated output was incorrect and had to be corrected
+
+These files document both the development process and the reasoning behind the final implementation.
+
+## Known Limitations
+
+See the **"If we had one more day"** section in [`DECISIONS.md`](DECISIONS.md) for known limitations and potential improvements.
