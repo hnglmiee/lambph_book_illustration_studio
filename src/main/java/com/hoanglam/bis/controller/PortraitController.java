@@ -13,7 +13,7 @@ import org.springframework.web.bind.annotation.RestController;
 import java.util.UUID;
 
 @RestController
-@RequestMapping("/api/projects/{projectId}/portraits")
+@RequestMapping("/api/projects/{projectId}/steps")
 @RequiredArgsConstructor
 public class PortraitController {
     private final GeminiPipelineService pipelineService;
