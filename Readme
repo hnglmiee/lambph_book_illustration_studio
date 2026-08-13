@@ -1,0 +1,51 @@
+# Book Illustration Studio
+
+Turns a book's text into character portraits and a chapter illustration, using the Gemini API. Five steps, run one at a time by the user: **Style → Characters → Portraits → Chapters → Illustrations**.
+
+## Quick start
+
+```bash
+cp .env.example .env
+# edit .env, set GEMINI_API_KEY
+
+./start.sh
+```
+
+Backend: `http://localhost:8080` · Frontend: `http://localhost:5173` · Swagger: `http://localhost:8080/swagger-ui/index.html`
+
+## Tests
+
+```bash
+./test.sh
+```
+
+Runs backend unit tests (JUnit + Mockito, no real Gemini calls, no quota cost). See `TESTING.md` for strategy and the latest report.
+
+## Prerequisites
+
+- Java 21
+- Maven (or use the bundled `./mvnw`)
+- Node.js 20+ / npm
+- Docker + Docker Compose (for Postgres)
+- A Gemini API key: https://aistudio.google.com/app/apikey
+
+## Environment variables
+
+See `.env.example`. The only required variable is `GEMINI_API_KEY`. Postgres credentials are pre-set for local dev in `docker-compose.yml` (not secrets — this is a throwaway local container).
+
+## Architecture overview
+
+- **Backend**: Spring Boot (Java 21), Postgres via Docker, Flyway-managed schema (`src/main/resources/db/migration`), JPA/Hibernate with `ddl-auto=validate` (migrations are the source of truth, not Hibernate auto-DDL).
+- **Frontend**: React + Vite + TypeScript.
+- **Storage**: book text and generated images live on the local filesystem (`./data/books`, `./data/images`), served through dedicated API endpoints — no S3/CDN, per the assignment's scope constraint.
+- **Gemini integration**: REST calls to the `interactions` API (not the SDK — see `DECISIONS.md` for why), with two independent conversation chains per project: one for text steps (book upload → style → characters → chapters) and one for image steps (portrait setup → portraits → illustration setup → illustrations), so the book's content is sent to Gemini exactly once and reused via `previous_interaction_id` for every subsequent call.
+- **Pipeline state**: each project tracks `status` (last completed step) and `step_state` (`IDLE`/`RUNNING`/`FAILED`) as two separate fields, plus a timestamp used to detect and recover a step stranded mid-call (e.g. a server restart) without manual DB intervention. See `DECISIONS.md` for the full reasoning.
+- **Concurrency**: JPA optimistic locking (`@Version`) plus an explicit `RUNNING` check inside the same transaction prevents a refresh, a second tab, or a double-click from firing the same Gemini call twice.
+
+## AI artifacts
+
+This project was built with AI coding assistance (Claude, via chat-driven iterative development). See `AGENTS.md` for the project context file used to keep the assistant aligned with the spec, and `DECISIONS.md` for the record of where AI-generated output was wrong and had to be corrected.
+
+## Known limitations
+
+See "If we had one more day" in `DECISIONS.md`.

@@ -237,7 +237,6 @@ class GeminiPipelineServiceTest {
 
 //            pipelineService.runChaptersStepAsync(projectId);
 
-
             assertThat(project.getChapters()).hasSize(1); // cap = 1, không phải 3
             assertThat(project.getChapters().get(0).getName()).isEqualTo("Chapter 1");
             assertThat(project.getStatus()).isEqualTo(ProjectStatus.CHAPTERS_GENERATED);

@@ -5,6 +5,7 @@ import com.hoanglam.bis.dto.GeminiInteraction;
 import com.hoanglam.bis.enums.ErrorCode;
 import com.hoanglam.bis.exceptions.ApiException;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 
@@ -14,30 +15,52 @@ public class GeminiInteractionClientImpl implements GeminiInteractionClient {
 
     private final RestClient geminiRestClient;
 
+    @Value("${gemini.api-key}")
+    private String apiKey;
+
     @Override
-    public GeminiInteraction createInteraction(CreateInteractionRequest request) {
+    public GeminiInteraction createInteraction(
+            CreateInteractionRequest request
+    ) {
         try {
             return geminiRestClient.post()
                     .uri("/v1beta/interactions")
+                    .header("x-goog-api-key", apiKey)
                     .body(request)
                     .retrieve()
                     .body(GeminiInteraction.class);
+
         } catch (Exception e) {
-            throw new ApiException(ErrorCode.GEMINI_CALL_FAILED,
-                    "Failed to create Gemini interaction: " + e.getMessage(), 502);
+            throw new ApiException(
+                    ErrorCode.GEMINI_CALL_FAILED,
+                    "Failed to create Gemini interaction: "
+                            + e.getMessage(),
+                    502
+            );
         }
     }
 
     @Override
-    public GeminiInteraction getInteraction(String interactionId) {
+    public GeminiInteraction getInteraction(
+            String interactionId
+    ) {
         try {
             return geminiRestClient.get()
-                    .uri("/v1beta/interactions/{id}", interactionId)
+                    .uri(
+                            "/v1beta/interactions/{id}",
+                            interactionId
+                    )
+                    .header("x-goog-api-key", apiKey)
                     .retrieve()
                     .body(GeminiInteraction.class);
+
         } catch (Exception e) {
-            throw new ApiException(ErrorCode.GEMINI_CALL_FAILED,
-                    "Failed to fetch Gemini interaction: " + e.getMessage(), 502);
+            throw new ApiException(
+                    ErrorCode.GEMINI_CALL_FAILED,
+                    "Failed to fetch Gemini interaction: "
+                            + e.getMessage(),
+                    502
+            );
         }
     }
 }

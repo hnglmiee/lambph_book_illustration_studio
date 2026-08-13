@@ -12,7 +12,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.util.UUID;
 @RestController
-@RequestMapping("/api/projects/{projectId}/chapters")
+@RequestMapping("/api/projects/{projectId}/steps")
 @RequiredArgsConstructor
 public class ChapterController {
     private final GeminiPipelineService pipelineService;
