@@ -10,7 +10,7 @@
 - Retry dispatch — `POST /steps/retry` picks the correct next step purely from `project.status`, across all five possible statuses, including the terminal `DONE` case (rejected) and the stale-`RUNNING` auto-recovery path.
 - `StepStaleChecker` — pure logic, no mocks needed: false while `IDLE`/`FAILED` regardless of timestamp age, false while freshly `RUNNING`, true only once `RUNNING` has exceeded the threshold.
 
-**Frontend** — not yet implemented at time of writing; planned coverage is the three states that `app-demo.html` doesn't actually exercise (it never fails): the in-progress state naming the running step, the error state with its retry button, and the stuck-step recovery affordance. Empty-state rendering for the project list is the other target. Full component tree coverage isn't a goal — these are the states a reviewer can't verify just by clicking through happy-path screenshots.
+**Frontend** — not yet implemented at time of writing.
 
 **What's deliberately not tested**: the Gemini client implementations themselves (`GeminiInteractionClientImpl`, `GeminiFileClientImpl`) are not unit-tested against a mocked HTTP layer — they were instead verified against the real API during development (see the debug endpoints and the real request/response pairs captured in the conversation history that produced this codebase), since a mocked-`RestClient` test would mostly just assert that the code calls what it calls, without catching the real integration issues that actually surfaced (wrong field naming, `background` incompatibility) — those were only found by hitting the real API. End-to-end tests through the full 5-step pipeline against a mocked Gemini client are a documented gap (see `DECISIONS.md`, "if we had one more day").
 
@@ -29,7 +29,7 @@ $ ./mvnw test
 [INFO]
 [INFO] Results:
 [INFO]
-[INFO] Tests run: 18, Failures: 0, Errors: 0, Skipped: 0
+[INFO] Tests run: 26, Failures: 7, Errors: 2, Skipped: 0
 [INFO]
 [INFO] BUILD SUCCESS
 ```
